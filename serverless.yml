@@ -1,0 +1,40 @@
+service: ieso-zonal-demand
+useDotenv: true
+
+frameworkVersion: '3'
+
+provider:
+  name: aws
+  runtime: python3.11
+  region: ${opt:region, 'us-east-1'}
+  stackName: ${self:service}-${sls:stage}-stack
+  iam:
+    role:
+      name: ${self:service}-${sls:stage}-lambda-role
+  environment:
+    TARGET_BUCKET: ${env:TARGET_BUCKET}
+    TARGET_PREFIX: ${env:TARGET_PREFIX}
+    TIMEOUT_SECONDS: ${env:TIMEOUT_SECONDS}
+    S3_SERVER_SIDE_ENCRYPTION: ${env:S3_SERVER_SIDE_ENCRYPTION}
+    LOG_LEVEL: ${env:LOG_LEVEL}
+    NORMALIZE_LONG_FORMAT: ${env:NORMALIZE_LONG_FORMAT}
+    WRITE_LOCAL_COPY: ${env:WRITE_LOCAL_COPY}
+
+  ecr:
+    images:
+      ieso-zonal-image:
+        path: ./
+
+functions:
+  ieso-zonal-demand-to-s3:
+    name: ${self:service}-${sls:stage}-to-s3
+    image:
+      name: ieso-zonal-image
+    events:
+      - schedule:
+          name: ${self:service}-${sls:stage}-hourly-trigger
+          rate: cron(15 * * * ? *)
+          description: "Trigger Lambda on the 15th minute of each hour"
+
+plugins:
+# - serverless-python-requirements # No longer needed for Docker deployment
