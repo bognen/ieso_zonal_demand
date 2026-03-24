@@ -80,6 +80,7 @@ class Config:
     write_local_copy: bool = True
     s3_server_side_encryption: str | None = None
     normalize_long_format: bool = True
+    latest_only: bool = False
 
 
 def build_report_url(year: int) -> str:
@@ -281,6 +282,19 @@ def run(config: Config) -> dict[str, Any]:
     df_wide = parse_ieso_zonal_csv(csv_text, config.year, source_url)
     df_final = to_long_format(df_wide) if config.normalize_long_format else df_wide
 
+    if config.latest_only:
+        # Sort by delivery_date and hour_ending to find the most recent record(s)
+        # They should already be sorted from parse_ieso_zonal_csv, but let's be safe.
+        df_final = df_final.sort_values(["delivery_date", "hour_ending"], ascending=False)
+        if not df_final.empty:
+            latest_date = df_final.iloc[0]["delivery_date"]
+            # Keep only the rows matching the most recent date
+            # This handles both long/wide formats and multiple hours for the same date.
+            # Using latest date (instead of just hour) is safer for hourly triggers
+            # as it handles cases where multiple hours are updated at once.
+            df_final = df_final[df_final["delivery_date"] == latest_date].copy()
+            logger.info("Filtering for latest data only: %s", latest_date.date())
+
     result: dict[str, Any] = {
         "dataset": config.dataset_name,
         "year": config.year,
@@ -324,16 +338,33 @@ def run(config: Config) -> dict[str, Any]:
     return result
 
 
+def _to_int(value: Any, default: int) -> int:
+    """Safely convert value to int, falling back to default if value is None or an empty string."""
+    if value is None:
+        return default
+    if isinstance(value, str) and not value.strip():
+        return default
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return default
+
+
 def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
-    year = int(event.get("year", CURRENT_YEAR - 1))
+    year = _to_int(event.get("year") or os.getenv("YEAR"), CURRENT_YEAR)
     bucket = event.get("bucket") or os.getenv("TARGET_BUCKET") or BUCKET_NAME
     prefix = event.get("prefix") or os.getenv("TARGET_PREFIX", DEFAULT_PREFIX)
     local_output = event.get("local_output") or os.getenv("LOCAL_OUTPUT", "/tmp")
-    timeout_seconds = int(event.get("timeout_seconds", os.getenv("TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS)))
-    region_name = event.get("region_name") or os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
+    timeout_seconds = _to_int(
+        event.get("timeout_seconds") or os.getenv("TIMEOUT_SECONDS"), DEFAULT_TIMEOUT_SECONDS
+    )
+    region_name = (
+        event.get("region_name") or os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
+    )
     write_local_copy = bool(event.get("write_local_copy", False))
     sse = event.get("s3_server_side_encryption") or os.getenv("S3_SERVER_SIDE_ENCRYPTION")
     normalize_long_format = bool(event.get("normalize_long_format", True))
+    latest_only = bool(event.get("latest_only", os.getenv("LATEST_ONLY", "false").lower() == "true"))
 
     config = Config(
         year=year,
@@ -345,6 +376,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         write_local_copy=write_local_copy,
         s3_server_side_encryption=sse,
         normalize_long_format=normalize_long_format,
+        latest_only=latest_only,
     )
     return run(config)
 
@@ -358,6 +390,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout-seconds", type=int, default=DEFAULT_TIMEOUT_SECONDS)
     parser.add_argument("--region-name", type=str, default=None)
     parser.add_argument("--wide-format", action="store_true", help="Write wide zonal columns instead of one row per zone per hour")
+    parser.add_argument("--latest-only", action="store_true", help="Only process the most recent records found in the source")
     parser.add_argument("--skip-local-copy", action="store_true", help="Do not write a local parquet file")
     parser.add_argument(
         "--s3-server-side-encryption",
@@ -380,6 +413,7 @@ if __name__ == "__main__":
         write_local_copy=not args.skip_local_copy,
         s3_server_side_encryption=args.s3_server_side_encryption,
         normalize_long_format=not args.wide_format,
+        latest_only=args.latest_only,
     )
     output = run(cfg)
     print(json.dumps(output, indent=2, default=str))
