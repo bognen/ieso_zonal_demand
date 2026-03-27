@@ -94,7 +94,9 @@ def fetch_report_csv_text(url: str, timeout_seconds: int) -> str:
     logger.info("Fetching IESO zonal demand report from %s", url)
     response = requests.get(url, timeout=timeout_seconds)
     response.raise_for_status()
-    return response.text
+    text = response.text
+    logger.info("Successfully fetched CSV. Length: %d characters, approx %d lines.", len(text), text.count("\n"))
+    return text
 
 
 def _find_header_row(lines: list[str]) -> int:
@@ -107,8 +109,10 @@ def _find_header_row(lines: list[str]) -> int:
 def parse_ieso_zonal_csv(csv_text: str, requested_year: int, source_url: str) -> pd.DataFrame:
     lines = [line for line in csv_text.splitlines() if line.strip()]
     header_idx = _find_header_row(lines)
+    logger.info("Found CSV header at row %d. Total non-empty lines: %d.", header_idx, len(lines))
     normalized_csv = "\n".join(lines[header_idx:])
     df = pd.read_csv(io.StringIO(normalized_csv), thousands=",")
+    logger.info("Raw DataFrame loaded. Initial rows: %d, columns: %d.", len(df), len(df.columns))
 
     required_cols = ["Date", "Hour", "Ontario Demand", *ZONE_COLUMNS, "Zone Total", "Diff"]
     missing = [col for col in required_cols if col not in df.columns]
@@ -145,7 +149,12 @@ def parse_ieso_zonal_csv(csv_text: str, requested_year: int, source_url: str) ->
 
     df = df[df["delivery_date"].dt.year == requested_year].copy()
     if df.empty:
+        logger.warning("No rows found for requested year %d in the dataset.", requested_year)
         raise ValueError(f"No rows found for requested year {requested_year}.")
+
+    min_date = df["delivery_date"].min()
+    max_date = df["delivery_date"].max()
+    logger.info("Filtered for year %d. Rows: %d. Date range: %s to %s.", requested_year, len(df), min_date.date(), max_date.date())
 
     df["year"] = df["delivery_date"].dt.year.astype("int16")
     df["month"] = df["delivery_date"].dt.month.astype("int8")
@@ -263,6 +272,8 @@ def upload_to_s3(
     server_side_encryption: str | None = None,
 ) -> None:
     s3 = boto3.client("s3", region_name=region_name)
+    content_length = len(parquet_bytes)
+    logger.info("Preparing to upload %d bytes to s3://%s/%s (SSE: %s)", content_length, bucket, key, server_side_encryption)
     extra_args: dict[str, Any] = {
         "Bucket": bucket,
         "Key": key,
@@ -272,8 +283,12 @@ def upload_to_s3(
     if server_side_encryption:
         extra_args["ServerSideEncryption"] = server_side_encryption
 
-    s3.put_object(**extra_args)
-    logger.info("Uploaded parquet file to s3://%s/%s", bucket, key)
+    try:
+        s3.put_object(**extra_args)
+        logger.info("Successfully uploaded parquet file to s3://%s/%s", bucket, key)
+    except Exception as e:
+        logger.error("Failed to upload to S3: %s", str(e), exc_info=True)
+        raise
 
 
 def run(config: Config) -> dict[str, Any]:
@@ -283,6 +298,7 @@ def run(config: Config) -> dict[str, Any]:
     df_final = to_long_format(df_wide) if config.normalize_long_format else df_wide
 
     if config.latest_only:
+        logger.info("latest_only is enabled. Filtering for most recent date...")
         # Sort by delivery_date and hour_ending to find the most recent record(s)
         # They should already be sorted from parse_ieso_zonal_csv, but let's be safe.
         df_final = df_final.sort_values(["delivery_date", "hour_ending"], ascending=False)
@@ -293,7 +309,9 @@ def run(config: Config) -> dict[str, Any]:
             # Using latest date (instead of just hour) is safer for hourly triggers
             # as it handles cases where multiple hours are updated at once.
             df_final = df_final[df_final["delivery_date"] == latest_date].copy()
-            logger.info("Filtering for latest data only: %s", latest_date.date())
+            logger.info("Filtering for latest data only. Date: %s. Rows remaining: %d.", latest_date.date(), len(df_final))
+        else:
+            logger.warning("latest_only is enabled but dataset is empty.")
 
     result: dict[str, Any] = {
         "dataset": config.dataset_name,

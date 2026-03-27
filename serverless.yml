@@ -46,6 +46,7 @@ functions:
     name: ${self:service}-${sls:stage}-to-s3
     image:
       name: ieso-zonal-image
+    timeout: ${env:TIMEOUT_SECONDS}
     events:
       - schedule:
           name: ${self:service}-${sls:stage}-hourly-trigger
