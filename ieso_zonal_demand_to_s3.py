@@ -44,9 +44,29 @@ except ImportError as exc:
         "pyarrow is required. Install it locally or package it in your Lambda container image."
     ) from exc
 
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s %(message)s")
+# Logging configuration for AWS Lambda
+# In AWS Lambda, the root logger is often already initialized, so basicConfig may not work.
+# We ensure the level is set for the module logger and use a custom setup if needed.
+LOG_LEVEL_STR = os.getenv("LOG_LEVEL", "INFO").upper() or "INFO"
+LOG_LEVEL = getattr(logging, LOG_LEVEL_STR, logging.INFO)
+
+# Set the level for the current logger
 logger = logging.getLogger(__name__)
+logger.setLevel(LOG_LEVEL)
+
+# Ensure output to console (CloudWatch Logs) if not already configured
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
+# Fallback: Also set the level of the root logger to ensure logs from other modules are caught
+logging.getLogger().setLevel(LOG_LEVEL)
+
+# Use print as a robust fallback for the very start of the execution in Lambda
+print(f"DEBUG_LOG: Loading Lambda module. LOG_LEVEL set to {LOG_LEVEL_STR}.")
+logger.info("Logger initialized with level: %s", LOG_LEVEL_STR)
 
 BASE_URL = "https://reports-public.ieso.ca/public/DemandZonal"
 BUCKET_NAME = "com.dsa.ieso-project"
@@ -81,19 +101,28 @@ class Config:
     s3_server_side_encryption: str | None = None
     normalize_long_format: bool = True
     latest_only: bool = False
+    yesterday_only: bool = False
 
 
 def build_report_url(year: int) -> str:
     """Use the annual file for closed years and the rolling file for the current year."""
     if year >= CURRENT_YEAR:
-        return f"{BASE_URL}/PUB_DemandZonal.csv"
-    return f"{BASE_URL}/PUB_DemandZonal_{year}.csv"
+        url = f"{BASE_URL}/PUB_DemandZonal.csv"
+    else:
+        url = f"{BASE_URL}/PUB_DemandZonal_{year}.csv"
+    logger.info("Built report URL for year %d: %s", year, url)
+    return url
 
 
 def fetch_report_csv_text(url: str, timeout_seconds: int) -> str:
-    logger.info("Fetching IESO zonal demand report from %s", url)
-    response = requests.get(url, timeout=timeout_seconds)
-    response.raise_for_status()
+    logger.info("Fetching IESO zonal demand report from %s with timeout %d seconds", url, timeout_seconds)
+    try:
+        response = requests.get(url, timeout=timeout_seconds)
+        response.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        logger.error("Failed to fetch CSV from IESO: %s", str(e))
+        raise
+    
     text = response.text
     logger.info("Successfully fetched CSV. Length: %d characters, approx %d lines.", len(text), text.count("\n"))
     return text
@@ -139,8 +168,11 @@ def parse_ieso_zonal_csv(csv_text: str, requested_year: int, source_url: str) ->
     ]
 
     df["delivery_date"] = pd.to_datetime(df["delivery_date"], format="mixed", errors="raise")
+    logger.info("Converted 'delivery_date' to datetime. Sample: %s", df["delivery_date"].iloc[0] if not df.empty else "N/A")
+
     for col in numeric_columns:
         df[col] = pd.to_numeric(df[col], errors="raise")
+    logger.info("Converted numeric columns: %s", numeric_columns)
 
     df["hour_ending"] = df["hour_ending"].astype("int16")
     for col in numeric_columns:
@@ -149,7 +181,8 @@ def parse_ieso_zonal_csv(csv_text: str, requested_year: int, source_url: str) ->
 
     df = df[df["delivery_date"].dt.year == requested_year].copy()
     if df.empty:
-        logger.warning("No rows found for requested year %d in the dataset.", requested_year)
+        logger.warning("No rows found for requested year %d in the dataset. Available years: %s", 
+                       requested_year, df["delivery_date"].dt.year.unique() if "delivery_date" in df.columns else "unknown")
         raise ValueError(f"No rows found for requested year {requested_year}.")
 
     min_date = df["delivery_date"].min()
@@ -297,21 +330,35 @@ def run(config: Config) -> dict[str, Any]:
     df_wide = parse_ieso_zonal_csv(csv_text, config.year, source_url)
     df_final = to_long_format(df_wide) if config.normalize_long_format else df_wide
 
-    if config.latest_only:
-        logger.info("latest_only is enabled. Filtering for most recent date...")
-        # Sort by delivery_date and hour_ending to find the most recent record(s)
-        # They should already be sorted from parse_ieso_zonal_csv, but let's be safe.
-        df_final = df_final.sort_values(["delivery_date", "hour_ending"], ascending=False)
-        if not df_final.empty:
-            latest_date = df_final.iloc[0]["delivery_date"]
-            # Keep only the rows matching the most recent date
-            # This handles both long/wide formats and multiple hours for the same date.
-            # Using latest date (instead of just hour) is safer for hourly triggers
-            # as it handles cases where multiple hours are updated at once.
-            df_final = df_final[df_final["delivery_date"] == latest_date].copy()
-            logger.info("Filtering for latest data only. Date: %s. Rows remaining: %d.", latest_date.date(), len(df_final))
+    if config.latest_only or config.yesterday_only:
+        if config.yesterday_only:
+            logger.info("yesterday_only is enabled. Filtering for the day before...")
+            # Use ingested_at_utc (now) to determine yesterday's date
+            # We use UTC because the Lambda trigger is UTC and IESO data is market time
+            # Market time is usually EST/EDT.
+            # However, for simplicity and consistency with the previous "latest_only" logic
+            # let's assume "yesterday" relative to the execution time.
+            now = pd.Timestamp.now(tz="UTC")
+            yesterday = (now - pd.Timedelta(days=1)).normalize().tz_localize(None)
+            df_final = df_final[df_final["delivery_date"] == yesterday].copy()
+            logger.info("Filtering for yesterday's data. Target date: %s. Rows remaining after filter: %d.", yesterday.date(), len(df_final))
         else:
-            logger.warning("latest_only is enabled but dataset is empty.")
+            logger.info("latest_only is enabled. Filtering for most recent date...")
+            # Sort by delivery_date and hour_ending to find the most recent record(s)
+            # They should already be sorted from parse_ieso_zonal_csv, but let's be safe.
+            df_final = df_final.sort_values(["delivery_date", "hour_ending"], ascending=False)
+            if not df_final.empty:
+                latest_date = df_final.iloc[0]["delivery_date"]
+                # Keep only the rows matching the most recent date
+                # This handles both long/wide formats and multiple hours for the same date.
+                # Using latest date (instead of just hour) is safer for hourly triggers
+                # as it handles cases where multiple hours are updated at once.
+                df_final = df_final[df_final["delivery_date"] == latest_date].copy()
+                logger.info("Filtering for latest data only. Found latest date: %s. Rows remaining after filter: %d.", latest_date.date(), len(df_final))
+                if df_final.empty:
+                    logger.warning("Dataframe became empty after filtering for latest date %s", latest_date)
+            else:
+                logger.warning("latest_only is enabled but dataset is empty before filtering.")
 
     result: dict[str, Any] = {
         "dataset": config.dataset_name,
@@ -324,8 +371,10 @@ def run(config: Config) -> dict[str, Any]:
     }
 
     # Partition by month
+    logger.info("Partitioning data by month. Total rows to process: %d", len(df_final))
     for month, df_month in df_final.groupby("month"):
         month = int(month)
+        logger.info("Processing month %d with %d rows", month, len(df_month))
         parquet_bytes = dataframe_to_parquet_bytes(df_month)
 
         if config.write_local_copy and config.local_output:
@@ -337,6 +386,7 @@ def run(config: Config) -> dict[str, Any]:
 
         if config.bucket:
             key = s3_parquet_key(config.prefix, config.year, month, config.normalize_long_format)
+            logger.info("Uploading partition to S3: s3://%s/%s", config.bucket, key)
             upload_to_s3(
                 parquet_bytes=parquet_bytes,
                 bucket=config.bucket,
@@ -345,6 +395,8 @@ def run(config: Config) -> dict[str, Any]:
                 server_side_encryption=config.s3_server_side_encryption,
             )
             result["s3_uris"].append(f"s3://{config.bucket}/{key}")
+        else:
+            logger.info("No bucket specified, skipping S3 upload for month %d", month)
 
     logger.info(
         "Finished processing year=%s rows=%s format=%s. Generated %s monthly partitions.",
@@ -369,6 +421,22 @@ def _to_int(value: Any, default: int) -> int:
 
 
 def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
+    print(f"DEBUG_LOG: lambda_handler invoked with event: {json.dumps(event, default=str)}")
+    logger.info("Lambda handler invoked with event: %s", json.dumps(event, default=str))
+    
+    # Log all relevant environment variables for debugging
+    env_vars = {
+        "TARGET_BUCKET": os.getenv("TARGET_BUCKET"),
+        "TARGET_PREFIX": os.getenv("TARGET_PREFIX"),
+        "TIMEOUT_SECONDS": os.getenv("TIMEOUT_SECONDS"),
+        "LOG_LEVEL": os.getenv("LOG_LEVEL"),
+        "LATEST_ONLY": os.getenv("LATEST_ONLY"),
+        "YESTERDAY_ONLY": os.getenv("YESTERDAY_ONLY"),
+        "YEAR": os.getenv("YEAR"),
+    }
+    print(f"DEBUG_LOG: Environment variables: {json.dumps(env_vars, default=str)}")
+    logger.info("Environment variables: %s", json.dumps(env_vars, default=str))
+
     year = _to_int(event.get("year") or os.getenv("YEAR"), CURRENT_YEAR)
     bucket = event.get("bucket") or os.getenv("TARGET_BUCKET") or BUCKET_NAME
     prefix = event.get("prefix") or os.getenv("TARGET_PREFIX", DEFAULT_PREFIX)
@@ -383,6 +451,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     sse = event.get("s3_server_side_encryption") or os.getenv("S3_SERVER_SIDE_ENCRYPTION")
     normalize_long_format = bool(event.get("normalize_long_format", True))
     latest_only = bool(event.get("latest_only", os.getenv("LATEST_ONLY", "false").lower() == "true"))
+    yesterday_only = bool(event.get("yesterday_only", os.getenv("YESTERDAY_ONLY", "false").lower() == "true"))
 
     config = Config(
         year=year,
@@ -395,8 +464,19 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         s3_server_side_encryption=sse,
         normalize_long_format=normalize_long_format,
         latest_only=latest_only,
+        yesterday_only=yesterday_only,
     )
-    return run(config)
+    print(f"DEBUG_LOG: Final configuration: {config}")
+    logger.info("Configuration: %s", config)
+    
+    try:
+        result = run(config)
+        print(f"DEBUG_LOG: Execution finished successfully. S3 URIs: {result.get('s3_uris')}")
+        return result
+    except Exception as e:
+        print(f"DEBUG_LOG: ERROR in lambda_handler: {str(e)}")
+        logger.exception("Error during execution of run(): %s", str(e))
+        raise
 
 
 def parse_args() -> argparse.Namespace:
@@ -409,6 +489,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--region-name", type=str, default=None)
     parser.add_argument("--wide-format", action="store_true", help="Write wide zonal columns instead of one row per zone per hour")
     parser.add_argument("--latest-only", action="store_true", help="Only process the most recent records found in the source")
+    parser.add_argument("--yesterday-only", action="store_true", help="Only process the records for the day before execution")
     parser.add_argument("--skip-local-copy", action="store_true", help="Do not write a local parquet file")
     parser.add_argument(
         "--s3-server-side-encryption",
@@ -432,6 +513,7 @@ if __name__ == "__main__":
         s3_server_side_encryption=args.s3_server_side_encryption,
         normalize_long_format=not args.wide_format,
         latest_only=args.latest_only,
+        yesterday_only=args.yesterday_only,
     )
     output = run(cfg)
     print(json.dumps(output, indent=2, default=str))

@@ -34,7 +34,8 @@ provider:
     LOG_LEVEL: ${env:LOG_LEVEL}
     NORMALIZE_LONG_FORMAT: ${env:NORMALIZE_LONG_FORMAT}
     WRITE_LOCAL_COPY: ${env:WRITE_LOCAL_COPY}
-    LATEST_ONLY: ${env:LATEST_ONLY, 'true'}
+    LATEST_ONLY: ${env:LATEST_ONLY, 'false'}
+    YESTERDAY_ONLY: ${env:YESTERDAY_ONLY, 'true'}
 
   ecr:
     images:
@@ -49,9 +50,9 @@ functions:
     timeout: ${env:TIMEOUT_SECONDS}
     events:
       - schedule:
-          name: ${self:service}-${sls:stage}-hourly-trigger
-          rate: cron(15 * * * ? *)
-          description: "Trigger Lambda on the 15th minute of each hour"
+          name: ${self:service}-${sls:stage}-daily-trigger
+          rate: cron(15 3 * * ? *)
+          description: "Trigger Lambda daily at 3:15 AM UTC to pull data for the day before"
 
 plugins:
 # - serverless-python-requirements # No longer needed for Docker deployment
