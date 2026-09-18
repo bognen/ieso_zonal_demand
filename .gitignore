@@ -160,3 +160,8 @@ yarn-error.log*
 .vscode/
 *.swp
 *.swo
+
+# Local scratch data (raw source downloads, ad hoc debug output)
+/*.csv
+/data/
+/out/
