@@ -4,9 +4,9 @@ This script downloads the IESO Hourly Zonal Demand report, converts it to Parque
 
 ## Files
 - `ieso_zonal_demand_to_s3.py` (Main script)
-- `requirements_ieso_load.txt` (Python dependencies)
+- `requirements.txt` (Python dependencies)
 - `serverless.yml` (Serverless Framework configuration)
-- `.env` (Environment variables for deployment)
+- `.env` (Environment variables for deployment, not committed)
 
 ## Source
 Base folder:
@@ -67,7 +67,7 @@ serverless deploy --region us-east-1
 ```
 
 ### EventBridge Trigger
-The deployment includes an EventBridge schedule that triggers the Lambda function automatically at the **15th minute of each hour** (`cron(15 * * * ? *)`).
+The deployment includes an EventBridge schedule that triggers the Lambda function automatically **daily at 3:15 AM UTC** (`cron(15 3 * * ? *)`) to pull the prior day's data.
 
 ## Lambda event
 ```json

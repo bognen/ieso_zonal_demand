@@ -1,6 +1,7 @@
 {
-  "dependencies": {
-    "serverless-dotenv-plugin": "^6.0.0",
-    "serverless-python-requirements": "^6.1.2"
-  }
+  "name": "ieso-zonal-demand",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Serverless Framework deployment config for the IESO zonal demand Lambda",
+  "dependencies": {}
 }

@@ -64,8 +64,6 @@ if not logger.handlers:
 # Fallback: Also set the level of the root logger to ensure logs from other modules are caught
 logging.getLogger().setLevel(LOG_LEVEL)
 
-# Use print as a robust fallback for the very start of the execution in Lambda
-print(f"DEBUG_LOG: Loading Lambda module. LOG_LEVEL set to {LOG_LEVEL_STR}.")
 logger.info("Logger initialized with level: %s", LOG_LEVEL_STR)
 
 BASE_URL = "https://reports-public.ieso.ca/public/DemandZonal"
@@ -421,10 +419,8 @@ def _to_int(value: Any, default: int) -> int:
 
 
 def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
-    print(f"DEBUG_LOG: lambda_handler invoked with event: {json.dumps(event, default=str)}")
     logger.info("Lambda handler invoked with event: %s", json.dumps(event, default=str))
-    
-    # Log all relevant environment variables for debugging
+
     env_vars = {
         "TARGET_BUCKET": os.getenv("TARGET_BUCKET"),
         "TARGET_PREFIX": os.getenv("TARGET_PREFIX"),
@@ -434,8 +430,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         "YESTERDAY_ONLY": os.getenv("YESTERDAY_ONLY"),
         "YEAR": os.getenv("YEAR"),
     }
-    print(f"DEBUG_LOG: Environment variables: {json.dumps(env_vars, default=str)}")
-    logger.info("Environment variables: %s", json.dumps(env_vars, default=str))
+    logger.debug("Environment variables: %s", json.dumps(env_vars, default=str))
 
     year = _to_int(event.get("year") or os.getenv("YEAR"), CURRENT_YEAR)
     bucket = event.get("bucket") or os.getenv("TARGET_BUCKET") or BUCKET_NAME
@@ -466,16 +461,14 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         latest_only=latest_only,
         yesterday_only=yesterday_only,
     )
-    print(f"DEBUG_LOG: Final configuration: {config}")
     logger.info("Configuration: %s", config)
-    
+
     try:
         result = run(config)
-        print(f"DEBUG_LOG: Execution finished successfully. S3 URIs: {result.get('s3_uris')}")
+        logger.info("Execution finished successfully. S3 URIs: %s", result.get("s3_uris"))
         return result
-    except Exception as e:
-        print(f"DEBUG_LOG: ERROR in lambda_handler: {str(e)}")
-        logger.exception("Error during execution of run(): %s", str(e))
+    except Exception:
+        logger.exception("Error during execution of run()")
         raise
 
 
