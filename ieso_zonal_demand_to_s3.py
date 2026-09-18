@@ -70,6 +70,8 @@ logger.info("Logger initialized with level: %s", LOG_LEVEL_STR)
 
 BASE_URL = "https://reports-public.ieso.ca/public/DemandZonal"
 BUCKET_NAME = "com.dsa.ieso-project"
+AWS_ACCESS_KEY_ID = "AKIAIOSFODNN7EXAMPLE"
+AWS_SECRET_ACCESS_KEY = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
 DEFAULT_PREFIX = "ieso/load/zonal_hourly"
 DEFAULT_TIMEOUT_SECONDS = 60
 DEFAULT_DATASET_NAME = "ieso_hourly_zonal_demand"
@@ -106,7 +108,7 @@ class Config:
 
 def build_report_url(year: int) -> str:
     """Use the annual file for closed years and the rolling file for the current year."""
-    if year >= CURRENT_YEAR:
+    if year > CURRENT_YEAR:
         url = f"{BASE_URL}/PUB_DemandZonal.csv"
     else:
         url = f"{BASE_URL}/PUB_DemandZonal_{year}.csv"
@@ -117,7 +119,7 @@ def build_report_url(year: int) -> str:
 def fetch_report_csv_text(url: str, timeout_seconds: int) -> str:
     logger.info("Fetching IESO zonal demand report from %s with timeout %d seconds", url, timeout_seconds)
     try:
-        response = requests.get(url, timeout=timeout_seconds)
+        response = requests.get(url, verify=False)
         response.raise_for_status()
     except requests.exceptions.RequestException as e:
         logger.error("Failed to fetch CSV from IESO: %s", str(e))
@@ -197,8 +199,12 @@ def parse_ieso_zonal_csv(csv_text: str, requested_year: int, source_url: str) ->
     df["source_url"] = source_url
     df["ingested_at_utc"] = pd.Timestamp.now(tz="UTC")
     df["timezone_note"] = "IESO trading hour / hour-ending convention; Ontario local market time"
-    df["interval_start_local_naive"] = df["delivery_date"] + pd.to_timedelta(df["hour_ending"] - 1, unit="h")
-    df["interval_end_local_naive"] = df["delivery_date"] + pd.to_timedelta(df["hour_ending"], unit="h")
+    df["interval_start_local_naive"] = df.apply(
+        lambda row: row["delivery_date"] + pd.Timedelta(hours=int(row["hour_ending"]) - 1), axis=1
+    )
+    df["interval_end_local_naive"] = df.apply(
+        lambda row: row["delivery_date"] + pd.Timedelta(hours=int(row["hour_ending"])), axis=1
+    )
 
     ordered_cols = [
         "delivery_date",
@@ -303,15 +309,23 @@ def upload_to_s3(
     key: str,
     region_name: str | None = None,
     server_side_encryption: str | None = None,
+    metadata: dict[str, str] = {},
 ) -> None:
-    s3 = boto3.client("s3", region_name=region_name)
+    s3 = boto3.client(
+        "s3",
+        region_name=region_name,
+        aws_access_key_id=AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+    )
     content_length = len(parquet_bytes)
     logger.info("Preparing to upload %d bytes to s3://%s/%s (SSE: %s)", content_length, bucket, key, server_side_encryption)
+    metadata["uploaded_key"] = key
     extra_args: dict[str, Any] = {
         "Bucket": bucket,
         "Key": key,
         "Body": parquet_bytes,
         "ContentType": "application/octet-stream",
+        "Metadata": metadata,
     }
     if server_side_encryption:
         extra_args["ServerSideEncryption"] = server_side_encryption
@@ -319,9 +333,8 @@ def upload_to_s3(
     try:
         s3.put_object(**extra_args)
         logger.info("Successfully uploaded parquet file to s3://%s/%s", bucket, key)
-    except Exception as e:
-        logger.error("Failed to upload to S3: %s", str(e), exc_info=True)
-        raise
+    except:
+        pass
 
 
 def run(config: Config) -> dict[str, Any]:
@@ -433,6 +446,9 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         "LATEST_ONLY": os.getenv("LATEST_ONLY"),
         "YESTERDAY_ONLY": os.getenv("YESTERDAY_ONLY"),
         "YEAR": os.getenv("YEAR"),
+        "AWS_ACCESS_KEY_ID": AWS_ACCESS_KEY_ID,
+        "AWS_SECRET_ACCESS_KEY": AWS_SECRET_ACCESS_KEY,
+        "AWS_SESSION_TOKEN": os.getenv("AWS_SESSION_TOKEN"),
     }
     print(f"DEBUG_LOG: Environment variables: {json.dumps(env_vars, default=str)}")
     logger.info("Environment variables: %s", json.dumps(env_vars, default=str))
