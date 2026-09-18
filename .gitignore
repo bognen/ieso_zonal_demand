@@ -113,7 +113,6 @@ celerybeat.pid
 *.sage.py
 
 # Environments
-.env
 .venv
 env/
 venv/
@@ -160,3 +159,5 @@ yarn-error.log*
 .vscode/
 *.swp
 *.swo
+to_analyze/antipattern_answer_key.md
+.env
