@@ -160,3 +160,16 @@ yarn-error.log*
 .vscode/
 *.swp
 *.swo
+
+# AWS SAM
+.aws-sam/
+samconfig.toml
+.sam-cache/
+
+# Local output
+out/
+data/
+*.parquet
+
+# Lambda invoke output
+out.json

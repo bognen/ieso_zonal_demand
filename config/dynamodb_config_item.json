@@ -1,0 +1,12 @@
+{
+  "config_id": {"S": "scrape-ieso-zonal-demand"},
+  "bucket": {"S": "com.dsa.ieso-project"},
+  "prefix": {"S": "ieso/load/zonal_hourly"},
+  "dataset_name": {"S": "ieso_hourly_zonal_demand"},
+  "timeout_seconds": {"N": "60"},
+  "s3_server_side_encryption": {"S": "AES256"},
+  "normalize_long_format": {"BOOL": true},
+  "lookback_days": {"N": "2"},
+  "latest_only": {"BOOL": false},
+  "log_level": {"S": "INFO"}
+}
