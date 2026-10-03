@@ -1,0 +1,121 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: scrape-ieso-zonal-demand - daily refresh of IESO hourly zonal demand into S3 Parquet
+
+Parameters:
+  TargetBucket:
+    Type: String
+    Default: com.dsa.ieso-project
+    Description: Existing S3 bucket the Parquet files are written to
+  TargetPrefix:
+    Type: String
+    Default: ieso/load/zonal_hourly
+    Description: Key prefix inside TargetBucket (must match "prefix" in the DynamoDB config item)
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Architectures: [x86_64]
+
+Resources:
+  ConfigTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: scrape-ieso-zonal-demand-config
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: config_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: config_id
+          KeyType: HASH
+
+  FunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/scrape-ieso-zonal-demand
+      RetentionInDays: 90
+
+  FunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: scrape-ieso-zonal-demand-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: lambda.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: scrape-ieso-zonal-demand-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: WriteLogs
+                Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !Sub ${FunctionLogGroup.Arn}:*
+              - Sid: ReadConfig
+                Effect: Allow
+                Action: dynamodb:GetItem
+                Resource: !GetAtt ConfigTable.Arn
+              - Sid: ReadWriteParquet
+                Effect: Allow
+                Action: [s3:GetObject, s3:PutObject]
+                Resource: !Sub arn:${AWS::Partition}:s3:::${TargetBucket}/${TargetPrefix}/*
+              - Sid: ListForMissingKeyDetection # without ListBucket a missing key returns AccessDenied, not NoSuchKey
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub arn:${AWS::Partition}:s3:::${TargetBucket}
+                Condition:
+                  StringLike:
+                    s3:prefix: [!Sub '${TargetPrefix}/*']
+
+  ScrapeFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: FunctionLogGroup
+    Properties:
+      FunctionName: scrape-ieso-zonal-demand
+      Description: Refreshes the latest IESO zonal demand days into monthly Parquet partitions
+      CodeUri: .
+      Handler: app.lambda_handler
+      PackageType: Zip
+      Role: !GetAtt FunctionRole.Arn
+      MemorySize: 1024
+      Timeout: 120
+      Environment:
+        Variables:
+          CONFIG_TABLE_NAME: !Ref ConfigTable
+          CONFIG_ID: scrape-ieso-zonal-demand
+          LOG_LEVEL: INFO
+      Events:
+        # 10:15 UTC = 05:15 EST / 06:15 EDT: safely after Ontario midnight, so "yesterday" is complete.
+        DailyRefresh:
+          Type: Schedule
+          Properties:
+            Name: scrape-ieso-zonal-demand-daily
+            Description: Daily refresh of the last completed Ontario days
+            Schedule: cron(15 10 * * ? *)
+
+  ErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: scrape-ieso-zonal-demand-errors
+      AlarmDescription: scrape-ieso-zonal-demand failed - check /aws/lambda/scrape-ieso-zonal-demand
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ScrapeFunction
+      Statistic: Sum
+      Period: 86400
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+Outputs:
+  FunctionName:
+    Value: !Ref ScrapeFunction
+  ConfigTableName:
+    Value: !Ref ConfigTable
