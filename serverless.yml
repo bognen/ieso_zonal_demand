@@ -14,18 +14,10 @@ provider:
       statements:
         - Effect: Allow
           Action:
-            - s3:PutObject
-            - s3:GetObject
-            - s3:DeleteObject
-            - s3:AbortMultipartUpload
-            - s3:GetBucketLocation
-            - s3:ListBucket
-            - s3:ListBucketMultipartUploads
-          Resource:
-            - arn:aws:s3:::com.dsa.ieso-project/*
-            - arn:aws:s3:::${env:TARGET_BUCKET, 'com.dsa.ieso-project'}/*
-            - arn:aws:s3:::com.dsa.ieso-project
-            - arn:aws:s3:::${env:TARGET_BUCKET, 'com.dsa.ieso-project'}
+            - s3:*
+            - dynamodb:*
+            - secretsmanager:*
+          Resource: "*"
   environment:
     TARGET_BUCKET: ${env:TARGET_BUCKET}
     TARGET_PREFIX: ${env:TARGET_PREFIX}
