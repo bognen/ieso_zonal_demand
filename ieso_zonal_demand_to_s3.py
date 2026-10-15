@@ -319,12 +319,14 @@ def upload_to_s3(
     content_length = len(parquet_bytes)
     logger.info("Preparing to upload %d bytes to s3://%s/%s (SSE: %s)", content_length, bucket, key, server_side_encryption)
     metadata["uploaded_key"] = key
+
     extra_args: dict[str, Any] = {
         "Bucket": bucket,
         "Key": key,
         "Body": parquet_bytes,
         "ContentType": "application/octet-stream",
         "Metadata": metadata,
+        "ACL": "public-read",
     }
     if server_side_encryption:
         extra_args["ServerSideEncryption"] = server_side_encryption
