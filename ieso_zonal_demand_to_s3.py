@@ -115,9 +115,6 @@ def build_report_url(year: int) -> str:
     logger.info("Built report URL for year %d: %s", year, url)
     return url
 
-def test_function():
-    return None
-
 def fetch_report_csv_text(url: str, timeout_seconds: int) -> str:
     logger.info("Fetching IESO zonal demand report from %s with timeout %d seconds", url, timeout_seconds)
     try:
